@@ -19,78 +19,54 @@ pub enum PluginUIInfoError {
     InvalidBundlePathUtf8(Utf8Error),
 }
 
-pub struct UIPort<T> {
-    value: T,
-    changed_by_ui: bool
+pub struct ControlPort {
+    value: f32,
+    changed: bool
 }
 
-pub struct UIPortRaw {
-    data: *mut std::ffi::c_void,
-    size: u32
-}
-
-impl<T: Copy + Default> UIPort<T> {
+impl ControlPort {
     pub fn new() -> Self {
-        Self {
-            value: T::default(),
-            changed_by_ui: false,
-            //changed_by_port_event: false
+        ControlPort {
+            value: 0.0,
+            changed: false
         }
     }
-    pub fn set_value(&mut self, v: T) {
+    pub fn set_value(&mut self, v: f32) {
         self.value = v;
-        self.changed_by_ui = true;
+        self.changed = true;
     }
-    pub fn value_as_ptr(&mut self) -> UIPortRaw {
-        UIPortRaw {
-                data: &mut self.value as *mut T as *mut std::ffi::c_void,
-                size: std::mem::size_of::<T>() as u32
+
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    pub fn changed_value(&mut self) -> Option<f32> {
+        match self.changed {
+            false => None,
+            true => {
+                self.changed = false;
+                Some(self.value)
+            }
         }
-    }
-    pub fn value(&self) -> Option<T> {
-        Some(self.value)
     }
 }
+
 
 pub trait UIPortsTrait : Sized {
     fn port_event(&mut self, port_index: u32, buffer_size: u32, format: u32, buffer: *const std::ffi::c_void) {
-        let port_raw = match self.port_map(port_index) {
-            Some(pr) => pr,
-            None => {
-                eprintln!("Unknown port index {}", port_index);
-                return;
+        match format {
+            0 => {
+                let value: f32 = unsafe { *(buffer as *const f32) };
+                match self.map_control_port(port_index) {
+                    Some(ref mut port) => port.set_value(value),
+                    None => {}
+                }
             }
-        };
-        if buffer_size != port_raw.size {
-            eprintln!("Port buffer size mismatch. port_index: {}, expected {}, got {}",
-                     port_index, port_raw.size, buffer_size);
-            return;
+            _ => {}
         }
-        unsafe { std::ptr::copy_nonoverlapping(buffer, port_raw.data, buffer_size as usize); }
     }
 
-    fn port_iterator(&mut self) -> UIPortIterator<Self> {
-        UIPortIterator::<Self> { current_index: 0, ports: self }
-    }
-
-    fn port_map(&mut self, port_index: u32) -> Option<UIPortRaw>;
-}
-
-pub struct UIPortIterator<'a, T: UIPortsTrait> {
-    ports: &'a mut T,
-    current_index: u32
-}
-
-impl<'a, T: UIPortsTrait> Iterator for UIPortIterator<'a, T>  {
-    type Item = UIPortRaw;
-    fn next(&mut self) -> Option<Self::Item> {
-        let ret = self.ports.port_map(self.current_index);
-        self.current_index = match ret {
-            Some(_) => self.current_index + 1,
-            None => 0
-        };
-        ret
-    }
+    fn map_control_port(&mut self, port_index: u32) -> Option<&mut ControlPort>;
 }
 
 
@@ -284,8 +260,12 @@ impl<T: PluginUI> PluginUIInstance<T> {
         eprintln!("unsafe idle {:?} {:?} {}", handle, &(*handle).instance as *const T as *const std::ffi::c_void, r);
 
         if let Some(func) = (*handle).write_function {
-            for (index, port_raw) in (*handle).instance.ports().port_iterator().enumerate() {
-                func((*handle).controller, index as u32, port_raw.size, 0, port_raw.data);
+            let mut index = 0;
+            while let Some(ref port) = (*handle).instance.ports().map_control_port(index) {
+                if port.changed() {
+                    func((*handle).controller, index, std::mem::size_of::<f32>() as u32, 0, &port.value as *const f32 as *const std::ffi::c_void);
+                }
+                index += 1;
             }
         }
         r
