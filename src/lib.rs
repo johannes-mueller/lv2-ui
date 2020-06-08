@@ -1,18 +1,27 @@
 
 extern crate lv2_sys;
 extern crate lv2_core;
+extern crate lv2_atom;
 extern crate urid;
 
 use lv2_sys as sys;
+use lv2_atom as atom;
 
 use std::os::raw::c_char;
 use std::ffi::CStr;
 use std::path::Path;
 use std::str::Utf8Error;
+use std::ptr;
 
 use lv2_core::prelude::*;
-use urid::Uri;
+use atom::prelude::*;
+use atom::space::RootMutSpace;
+use urid::*;
 use std::fmt::Debug;
+
+
+#[uri("http://lv2plug.in/ns/ext/atom#eventTransfer")]
+pub struct AtomEventTransfer;
 
 #[derive(Debug)]
 pub enum PluginUIInfoError {
@@ -51,6 +60,39 @@ impl ControlPort {
     }
 }
 
+pub struct UIAtomPort {
+    message: Option<Vec<u8>>,
+    urid: URID<AtomEventTransfer>
+}
+
+impl UIAtomPort {
+    pub fn new(urid: URID<AtomEventTransfer>) -> UIAtomPort {
+        UIAtomPort {
+            message: None,
+            urid
+        }
+    }
+
+    pub fn set_message(&mut self, msg: Vec<u8>) {
+        self.message = Some(msg);
+    }
+
+    pub fn take_message(&mut self) -> Option<Vec<u8>> {
+        self.message.take()
+    }
+
+    pub fn init<'a, A: atom::Atom<'a, 'a>>(
+        &'a self,
+        space: &'a mut RootMutSpace<'a>,
+        urid: URID<A>,
+        parameter: A::WriteParameter
+    ) -> Option<A::WriteHandle> {
+        //let mut space = &mut atom::space::RootMutSpace::new(&mut self.buffer);
+        (space as &mut dyn MutSpace).init(urid, parameter)
+    }
+}
+
+
 
 pub trait UIPortsTrait : Sized {
     fn port_event(&mut self, port_index: u32, buffer_size: u32, format: u32, buffer: *const std::ffi::c_void) {
@@ -59,14 +101,37 @@ pub trait UIPortsTrait : Sized {
                 let value: f32 = unsafe { *(buffer as *const f32) };
                 match self.map_control_port(port_index) {
                     Some(ref mut port) => port.set_value(value),
-                    None => {}
+                    None => println!("unknown control port: {}", port_index)
                 }
             }
-            _ => {}
+            urid => {
+                match self.map_atom_port(port_index) {
+                    Some(ref mut port) => {
+                        if port.urid.get() == urid {
+                            println!("matching port event {}", buffer_size);
+                            let mut message: Vec<u8> = Vec::with_capacity(buffer_size as usize);
+                            // FIXME: should work without copying
+                            unsafe {
+                                ptr::copy_nonoverlapping(buffer as *const u8,
+                                                         message.as_mut_ptr(),
+                                                         buffer_size as usize);
+                                message.set_len(buffer_size as usize);
+                            }
+                            port.message = Some(message);
+                        } else {
+                            println!("urids of port {} don't match", port_index);
+                        }
+
+                    }
+                    None => println!("unknown atom port: {}", port_index)
+                }
+            }
         }
     }
 
     fn map_control_port(&mut self, port_index: u32) -> Option<&mut ControlPort>;
+
+    fn map_atom_port(&mut self, port_index: u32) -> Option<&mut UIAtomPort>;
 }
 
 
@@ -136,7 +201,7 @@ pub trait PluginUI : Sized + 'static {
     fn update(&mut self);
 
     fn port_event(&mut self, port_index: u32, buffer_size: u32, format: u32, buffer: *const std::ffi::c_void) {
-        eprintln!("port_event: {}, {}", port_index, unsafe {*(buffer as *const f32)});
+        //eprintln!("port_event: {}, {}", port_index, unsafe {*(buffer as *const f32)});
         self.ports().port_event(port_index, buffer_size, format, buffer);
         self.update();
     }
@@ -217,13 +282,14 @@ impl<T: PluginUI> PluginUIInstance<T> {
         match T::new(&plugin_ui_info, &mut init_features, parent_widget) {
             Some(instance) => {
                 *widget = instance.widget();
-                let handle = Box::new(Self {
+                let mut handle = Box::new(Self {
                     instance,
                     write_function,
                     controller,
                     widget: *widget,
                     features
                 });
+                Self::write_ports(&mut handle);
                 Box::leak(handle) as *mut Self as sys::LV2UI_Handle
             }
             None => std::ptr::null_mut()
@@ -233,6 +299,7 @@ impl<T: PluginUI> PluginUIInstance<T> {
     pub unsafe extern "C" fn cleanup(handle: sys::LV2UI_Handle) {
         let handle = handle as *mut Self;
         (*handle).instance.cleanup();
+        Self::write_ports(&mut (*handle));
     }
 
     pub unsafe extern "C" fn port_event(handle: sys::LV2UI_Handle, port_index: u32, buffer_size: u32, format: u32, buffer: *const std::ffi::c_void) {
@@ -257,18 +324,43 @@ impl<T: PluginUI> PluginUIInstance<T> {
     pub unsafe extern "C" fn idle(handle: sys::LV2UI_Handle) -> i32 {
         let handle = handle as *mut Self;
         let r = (*handle).instance.idle();
-        eprintln!("unsafe idle {:?} {:?} {}", handle, &(*handle).instance as *const T as *const std::ffi::c_void, r);
+        //eprintln!("unsafe idle {:?} {:?} {}", handle, &(*handle).instance as *const T as *const std::ffi::c_void, r);
 
-        if let Some(func) = (*handle).write_function {
+        Self::write_ports(&mut (*handle));
+        r
+    }
+
+    fn write_ports(handle: &mut Self) {
+        if let Some(func) = handle.write_function {
             let mut index = 0;
-            while let Some(ref port) = (*handle).instance.ports().map_control_port(index) {
-                if port.changed() {
-                    func((*handle).controller, index, std::mem::size_of::<f32>() as u32, 0, &port.value as *const f32 as *const std::ffi::c_void);
+            loop {
+                if let Some(ref port) = handle.instance.ports().map_control_port(index) {
+                    if port.changed() {
+                        unsafe {
+                            func(handle.controller,
+                                 index,
+                                 std::mem::size_of::<f32>() as u32,
+                                 0,
+                                 &port.value as *const f32 as *const std::ffi::c_void);
+                        }
+                    }
+                } else if let Some(ref mut port) = handle.instance.ports().map_atom_port(index) {
+                    if let Some(msg) = port.message.take() {
+                        unsafe {
+                            func(handle.controller,
+                                 index,
+                                 msg.len() as u32,
+                                 port.urid.get(),
+                                 msg.as_slice() as *const [u8] as *const std::ffi::c_void);
+                        }
+                    }
+                } else {
+                    break;
                 }
                 index += 1;
             }
         }
-        r
+
     }
 }
 
