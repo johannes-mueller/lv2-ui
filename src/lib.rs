@@ -28,16 +28,28 @@ pub enum PluginUIInfoError {
     InvalidBundlePathUtf8(Utf8Error),
 }
 
+pub trait UIPort {
+    fn index(&self) -> u32;
+
+    fn protocol(&self) -> u32;
+
+    fn size(&self) -> usize;
+
+    fn data(&self) -> *const std::ffi::c_void;
+}
+
 pub struct ControlPort {
     value: f32,
-    changed: bool
+    changed: bool,
+    index: u32
 }
 
 impl ControlPort {
-    pub fn new() -> Self {
+    pub fn new(index: u32) -> Self {
         ControlPort {
             value: 0.0,
-            changed: false
+            changed: false,
+            index
         }
     }
     pub fn set_value(&mut self, v: f32) {
@@ -60,38 +72,96 @@ impl ControlPort {
     }
 }
 
+impl UIPort for ControlPort {
+    fn index(&self) -> u32 {
+        self.index
+    }
+    fn protocol(&self) -> u32 {
+        0
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of::<f32>()
+    }
+    fn data(&self) -> *const std::ffi::c_void {
+        &self.value as *const f32 as *const std::ffi::c_void
+    }
+}
+
 pub struct UIAtomPort {
-    message: Option<Vec<u8>>,
-    urid: URID<AtomEventTransfer>
+    space: SelfAllocatingSpace,
+    urid: URID<AtomEventTransfer>,
+    index: u32
 }
 
 impl UIAtomPort {
-    pub fn new(urid: URID<AtomEventTransfer>) -> UIAtomPort {
+    pub fn new(urid: URID<AtomEventTransfer>, index: u32) -> UIAtomPort {
         UIAtomPort {
-            message: None,
-            urid
+            space: SelfAllocatingSpace::new(),
+            urid,
+            index
         }
     }
 
-    pub fn set_message(&mut self, msg: Vec<u8>) {
-        self.message = Some(msg);
-    }
-
-    pub fn take_message(&mut self) -> Option<Vec<u8>> {
-        self.message.take()
+    pub fn read<'a, A: atom::Atom<'a, 'a>>(
+        &'a self,
+        urid: URID<A>,
+        parameter: A::ReadParameter
+    ) -> Option<A::ReadHandle> {
+        let space = atom::space::Space::from_slice(&self.space.data);
+        A::read(space.split_atom_body(urid)?.0, parameter)
     }
 
     pub fn init<'a, A: atom::Atom<'a, 'a>>(
-        &'a self,
-        space: &'a mut RootMutSpace<'a>,
+        &'a mut self,
         urid: URID<A>,
         parameter: A::WriteParameter
     ) -> Option<A::WriteHandle> {
-        //let mut space = &mut atom::space::RootMutSpace::new(&mut self.buffer);
-        (space as &mut dyn MutSpace).init(urid, parameter)
+        (&mut self.space as &mut dyn MutSpace).init(urid, parameter)
     }
 }
 
+impl UIPort for UIAtomPort {
+    fn index(&self) -> u32 {
+        self.index
+    }
+    fn protocol(&self) -> u32 {
+        self.urid.get()
+    }
+    fn size(&self) -> usize {
+        self.space.data.len()
+    }
+    fn data(&self) -> *const std::ffi::c_void {
+        self.space.data.as_ptr() as *const std::ffi::c_void
+    }
+}
+
+
+struct SelfAllocatingSpace {
+    data: Vec<u8>
+}
+
+impl SelfAllocatingSpace {
+    fn new() -> Self {
+        SelfAllocatingSpace {
+            data: Vec::new()
+        }
+    }
+    unsafe fn put_buffer(&mut self, buffer: std::ptr::NonNull<std::ffi::c_void>, size: usize) {
+        self.data = Vec::from_raw_parts(buffer.as_ptr() as *mut u8, size, size);
+    }
+}
+
+impl<'a> MutSpace<'a> for SelfAllocatingSpace {
+    fn allocate(&mut self, size: usize, apply_padding: bool) -> Option<(usize, &'a mut [u8])> {
+        let start_point = self.data.len();
+        self.data.resize(start_point + size, 0);
+        let return_slice = &mut self.data[start_point..];
+        Some((0,
+              unsafe {
+                  std::slice::from_raw_parts_mut(return_slice.as_mut_ptr(), size)
+        }))
+    }
+}
 
 
 pub trait UIPortsTrait : Sized {
@@ -108,16 +178,11 @@ pub trait UIPortsTrait : Sized {
                 match self.map_atom_port(port_index) {
                     Some(ref mut port) => {
                         if port.urid.get() == urid {
-                            println!("matching port event {}", buffer_size);
-                            let mut message: Vec<u8> = Vec::with_capacity(buffer_size as usize);
-                            // FIXME: should work without copying
-                            unsafe {
-                                ptr::copy_nonoverlapping(buffer as *const u8,
-                                                         message.as_mut_ptr(),
-                                                         buffer_size as usize);
-                                message.set_len(buffer_size as usize);
+                            if let Some(pointer) = ptr::NonNull::new(buffer as *mut std::ffi::c_void) {
+                                unsafe {
+                                    port.space.put_buffer(pointer, buffer_size as usize);
+                                }
                             }
-                            port.message = Some(message);
                         } else {
                             println!("urids of port {} don't match", port_index);
                         }
@@ -134,6 +199,26 @@ pub trait UIPortsTrait : Sized {
     fn map_atom_port(&mut self, port_index: u32) -> Option<&mut UIAtomPort>;
 }
 
+
+pub struct PluginPortWriteHandle {
+    write_function: sys::LV2UI_Write_Function,
+    controller: sys::LV2UI_Controller,
+}
+
+impl PluginPortWriteHandle {
+    pub fn write_port(&self, port: &impl UIPort) {
+        if let Some(write_function) = self.write_function {
+            unsafe {
+                write_function(self.controller,
+                               port.index(),
+                               port.size() as u32,
+                               port.protocol(),
+                               port.data()
+                );
+            }
+        }
+    }
+}
 
 pub struct PluginUIInfo<'a> {
     plugin_uri: &'a Uri,
@@ -192,7 +277,11 @@ pub trait PluginUI : Sized + 'static {
     type InitFeatures: FeatureCollection<'static>;
     type UIPorts: UIPortsTrait;
 
-    fn new(plugin_ui_info: &PluginUIInfo, features: &mut Self::InitFeatures, parent_window: *mut std::ffi::c_void) -> Option<Self>;
+    fn new(plugin_ui_info: &PluginUIInfo,
+           features: &mut Self::InitFeatures,
+           parent_window: *mut std::ffi::c_void,
+           write_handle: PluginPortWriteHandle
+    ) -> Option<Self>;
 
     fn cleanup(&mut self);
 
@@ -214,8 +303,6 @@ pub trait PluginUI : Sized + 'static {
 #[repr(C)]
 pub struct PluginUIInstance<T: PluginUI> {
     instance: T,
-    write_function: sys::LV2UI_Write_Function,
-    controller: sys::LV2UI_Controller,
     widget: sys::LV2UI_Widget,
     features: *const *const sys::LV2_Feature
 }
@@ -279,17 +366,19 @@ impl<T: PluginUI> PluginUIInstance<T> {
                 }
             };
 
-        match T::new(&plugin_ui_info, &mut init_features, parent_widget) {
+        let write_handle = PluginPortWriteHandle {
+            write_function,
+            controller
+        };
+
+        match T::new(&plugin_ui_info, &mut init_features, parent_widget, write_handle) {
             Some(instance) => {
                 *widget = instance.widget();
-                let mut handle = Box::new(Self {
+                let handle = Box::new(Self {
                     instance,
-                    write_function,
-                    controller,
                     widget: *widget,
                     features
                 });
-                Self::write_ports(&mut handle);
                 Box::leak(handle) as *mut Self as sys::LV2UI_Handle
             }
             None => std::ptr::null_mut()
@@ -299,10 +388,13 @@ impl<T: PluginUI> PluginUIInstance<T> {
     pub unsafe extern "C" fn cleanup(handle: sys::LV2UI_Handle) {
         let handle = handle as *mut Self;
         (*handle).instance.cleanup();
-        Self::write_ports(&mut (*handle));
     }
 
-    pub unsafe extern "C" fn port_event(handle: sys::LV2UI_Handle, port_index: u32, buffer_size: u32, format: u32, buffer: *const std::ffi::c_void) {
+    pub unsafe extern "C" fn port_event(handle: sys::LV2UI_Handle,
+                                        port_index: u32,
+                                        buffer_size: u32,
+                                        format: u32,
+                                        buffer: *const std::ffi::c_void) {
         let handle = handle as *mut Self;
         (*handle).instance.port_event(port_index, buffer_size, format, buffer);
     }
@@ -326,10 +418,11 @@ impl<T: PluginUI> PluginUIInstance<T> {
         let r = (*handle).instance.idle();
         //eprintln!("unsafe idle {:?} {:?} {}", handle, &(*handle).instance as *const T as *const std::ffi::c_void, r);
 
-        Self::write_ports(&mut (*handle));
+        //Self::write_ports(&mut (*handle));
         r
     }
 
+    /*
     fn write_ports(handle: &mut Self) {
         if let Some(func) = handle.write_function {
             let mut index = 0;
@@ -345,14 +438,15 @@ impl<T: PluginUI> PluginUIInstance<T> {
                         }
                     }
                 } else if let Some(ref mut port) = handle.instance.ports().map_atom_port(index) {
-                    if let Some(msg) = port.message.take() {
+                    if !port.message.is_empty() {
                         unsafe {
                             func(handle.controller,
                                  index,
-                                 msg.len() as u32,
+                                 port.message.len() as u32,
                                  port.urid.get(),
-                                 msg.as_slice() as *const [u8] as *const std::ffi::c_void);
+                                 port.message.as_slice() as *const [u8] as *const std::ffi::c_void);
                         }
+                        port.message.clear();
                     }
                 } else {
                     break;
@@ -362,6 +456,7 @@ impl<T: PluginUI> PluginUIInstance<T> {
         }
 
     }
+    */
 }
 
 pub unsafe trait PluginUIInstanceDescriptor {
