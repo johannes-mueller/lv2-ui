@@ -28,9 +28,12 @@ Look in those repose on how to build and install the example plugins.
 Still a lot
 
 * LV2 UI feature discovery
-* Atom ports
+* Atom ports [done]
 * Many things still need to be done the right way
-* Write derive macros
+* Implement macro rules for the descriptor structs and port collections
 * For sure a lot more
+* Integrate into rust-lv
+* Write actual plugins to test convenient usage
+* Write the two example plugins eg-sampler and eg-scope for the lv2 book
 
 Eventually this repo will hopefully disappear and become a part of rust-lv2.
