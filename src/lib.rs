@@ -90,7 +90,7 @@ impl UIPort for ControlPort {
 pub struct UIAtomPort {
     space: SelfAllocatingSpace,
     urid: URID<AtomEventTransfer>,
-    index: u32
+    index: u32,
 }
 
 impl UIAtomPort {
@@ -116,6 +116,7 @@ impl UIAtomPort {
         urid: URID<A>,
         parameter: A::WriteParameter
     ) -> Option<A::WriteHandle> {
+        self.space = SelfAllocatingSpace::new();
         (&mut self.space as &mut dyn MutSpace).init(urid, parameter)
     }
 }
@@ -361,7 +362,7 @@ impl<T: PluginUI> PluginUIInstance<T> {
             match T::InitFeatures::from_cache(&mut feature_cache, ThreadingClass::Instantiation) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("{}", e);
+                    eprintln!("extension data {}", e);
                     return std::ptr::null_mut();
                 }
             };
@@ -400,7 +401,6 @@ impl<T: PluginUI> PluginUIInstance<T> {
     }
 
     pub unsafe extern "C" fn extension_data(uri: *const c_char) -> *const std::ffi::c_void {
-        eprintln!("extension_data {:?}", CStr::from_ptr(uri));
         if CStr::from_ptr(uri) == CStr::from_bytes_with_nul_unchecked(sys::LV2_UI__idleInterface) {
             let interface = Box::new(sys::LV2UI_Idle_Interface { idle: Some(Self::idle) });
             Box::leak(interface) as *mut sys::LV2UI_Idle_Interface as *const std::ffi::c_void
@@ -416,47 +416,8 @@ impl<T: PluginUI> PluginUIInstance<T> {
     pub unsafe extern "C" fn idle(handle: sys::LV2UI_Handle) -> i32 {
         let handle = handle as *mut Self;
         let r = (*handle).instance.idle();
-        //eprintln!("unsafe idle {:?} {:?} {}", handle, &(*handle).instance as *const T as *const std::ffi::c_void, r);
-
-        //Self::write_ports(&mut (*handle));
         r
     }
-
-    /*
-    fn write_ports(handle: &mut Self) {
-        if let Some(func) = handle.write_function {
-            let mut index = 0;
-            loop {
-                if let Some(ref port) = handle.instance.ports().map_control_port(index) {
-                    if port.changed() {
-                        unsafe {
-                            func(handle.controller,
-                                 index,
-                                 std::mem::size_of::<f32>() as u32,
-                                 0,
-                                 &port.value as *const f32 as *const std::ffi::c_void);
-                        }
-                    }
-                } else if let Some(ref mut port) = handle.instance.ports().map_atom_port(index) {
-                    if !port.message.is_empty() {
-                        unsafe {
-                            func(handle.controller,
-                                 index,
-                                 port.message.len() as u32,
-                                 port.urid.get(),
-                                 port.message.as_slice() as *const [u8] as *const std::ffi::c_void);
-                        }
-                        port.message.clear();
-                    }
-                } else {
-                    break;
-                }
-                index += 1;
-            }
-        }
-
-    }
-    */
 }
 
 pub unsafe trait PluginUIInstanceDescriptor {
