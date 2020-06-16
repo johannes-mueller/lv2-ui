@@ -88,7 +88,8 @@ impl UIPort for ControlPort {
 }
 
 pub struct UIAtomPort {
-    space: SelfAllocatingSpace,
+    space_to_plugin: SelfAllocatingSpace,
+    space_to_ui: SelfAllocatingSpace,
     urid: URID<AtomEventTransfer>,
     index: u32,
 }
@@ -96,19 +97,19 @@ pub struct UIAtomPort {
 impl UIAtomPort {
     pub fn new(urid: URID<AtomEventTransfer>, index: u32) -> UIAtomPort {
         UIAtomPort {
-            space: SelfAllocatingSpace::new(),
+            space_to_plugin: SelfAllocatingSpace::new(),
+            space_to_ui: SelfAllocatingSpace::new(),
             urid,
-            index
+            index,
         }
     }
 
     pub fn read<'a, A: atom::Atom<'a, 'a>>(
-        &'a self,
+        &'a mut self,
         urid: URID<A>,
         parameter: A::ReadParameter
     ) -> Option<A::ReadHandle> {
-        let space = atom::space::Space::from_slice(&self.space.data);
-        A::read(space.split_atom_body(urid)?.0, parameter)
+        A::read(self.space_to_ui.take()?.split_atom_body(urid)?.0, parameter)
     }
 
     pub fn init<'a, A: atom::Atom<'a, 'a>>(
@@ -116,8 +117,12 @@ impl UIAtomPort {
         urid: URID<A>,
         parameter: A::WriteParameter
     ) -> Option<A::WriteHandle> {
-        self.space = SelfAllocatingSpace::new();
-        (&mut self.space as &mut dyn MutSpace).init(urid, parameter)
+        self.space_to_plugin = SelfAllocatingSpace::new();
+        (&mut self.space_to_plugin as &mut dyn MutSpace).init(urid, parameter)
+    }
+
+    unsafe fn put_buffer(&mut self, buffer: std::ptr::NonNull<std::ffi::c_void>, size: usize) {
+        self.space_to_ui.put_buffer(buffer, size);
     }
 }
 
@@ -129,26 +134,44 @@ impl UIPort for UIAtomPort {
         self.urid.get()
     }
     fn size(&self) -> usize {
-        self.space.data.len()
+        self.space_to_plugin.data.len()
     }
     fn data(&self) -> *const std::ffi::c_void {
-        self.space.data.as_ptr() as *const std::ffi::c_void
+        self.space_to_plugin.data.as_ptr() as *const std::ffi::c_void
     }
 }
 
 
 struct SelfAllocatingSpace {
-    data: Vec<u8>
+    data: Vec<u8>,
+    already_read: bool
 }
 
 impl SelfAllocatingSpace {
     fn new() -> Self {
         SelfAllocatingSpace {
-            data: Vec::new()
+            data: Vec::new(),
+            already_read: false,
         }
     }
+
     unsafe fn put_buffer(&mut self, buffer: std::ptr::NonNull<std::ffi::c_void>, size: usize) {
-        self.data = Vec::from_raw_parts(buffer.as_ptr() as *mut u8, size, size);
+        self.data.set_len(0);
+        self.data.reserve(size);
+        std::ptr::copy_nonoverlapping(buffer.cast().as_ptr() as *const u8,
+                                      self.data.as_mut_ptr(),
+                                      size);
+        self.data.set_len(size);
+        self.already_read = false;
+    }
+
+    fn take(&mut self) -> Option<atom::space::Space> {
+        if self.data.len() == 0 || self.already_read {
+            return None
+        }
+        let space = atom::space::Space::from_slice(&self.data);
+        self.already_read = true;
+        Some(space)
     }
 }
 
@@ -172,7 +195,7 @@ pub trait UIPortsTrait : Sized {
                 let value: f32 = unsafe { *(buffer as *const f32) };
                 match self.map_control_port(port_index) {
                     Some(ref mut port) => port.set_value(value),
-                    None => println!("unknown control port: {}", port_index)
+                    None => eprintln!("unknown control port: {}", port_index)
                 }
             }
             urid => {
@@ -181,15 +204,15 @@ pub trait UIPortsTrait : Sized {
                         if port.urid.get() == urid {
                             if let Some(pointer) = ptr::NonNull::new(buffer as *mut std::ffi::c_void) {
                                 unsafe {
-                                    port.space.put_buffer(pointer, buffer_size as usize);
+                                    port.put_buffer(pointer, buffer_size as usize);
                                 }
                             }
                         } else {
-                            println!("urids of port {} don't match", port_index);
+                            eprintln!("urids of port {} don't match", port_index);
                         }
 
                     }
-                    None => println!("unknown atom port: {}", port_index)
+                    None => eprintln!("unknown atom port: {}", port_index)
                 }
             }
         }
