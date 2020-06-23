@@ -424,10 +424,6 @@ impl<T: PluginUI> PluginUIInstance<T> {
         if CStr::from_ptr(uri) == CStr::from_bytes_with_nul_unchecked(sys::LV2_UI__idleInterface) {
             let interface = Box::new(sys::LV2UI_Idle_Interface { idle: Some(Self::idle) });
             Box::leak(interface) as *mut sys::LV2UI_Idle_Interface as *const std::ffi::c_void
-        } else if
-            CStr::from_ptr(uri) == CStr::from_bytes_with_nul_unchecked(sys::LV2_UI__showInterface) {
-                let interface = Box::new(sys::LV2UI_Idle_Interface { idle: Some(Self::idle) });
-                Box::leak(interface) as *mut sys::LV2UI_Idle_Interface as *const std::ffi::c_void
         } else {
             std::ptr::null()
         }
