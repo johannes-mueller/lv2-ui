@@ -20,9 +20,6 @@ use urid::*;
 use std::fmt::Debug;
 
 
-#[uri("http://lv2plug.in/ns/ext/atom#eventTransfer")]
-pub struct AtomEventTransfer;
-
 #[derive(Debug)]
 pub enum PluginUIInfoError {
     InvalidBundlePathUtf8(Utf8Error),
@@ -38,15 +35,15 @@ pub trait UIPort {
     fn data(&self) -> *const std::ffi::c_void;
 }
 
-pub struct ControlPort {
+pub struct UIControlPort {
     value: f32,
     changed: bool,
     index: u32
 }
 
-impl ControlPort {
+impl UIControlPort {
     pub fn new(index: u32) -> Self {
-        ControlPort {
+        UIControlPort {
             value: 0.0,
             changed: false,
             index
@@ -72,7 +69,7 @@ impl ControlPort {
     }
 }
 
-impl UIPort for ControlPort {
+impl UIPort for UIControlPort {
     fn index(&self) -> u32 {
         self.index
     }
@@ -90,12 +87,12 @@ impl UIPort for ControlPort {
 pub struct UIAtomPort {
     space_to_plugin: SelfAllocatingSpace,
     space_to_ui: SelfAllocatingSpace,
-    urid: URID<AtomEventTransfer>,
+    urid: URID<atom::uris::EventTransfer>,
     index: u32,
 }
 
 impl UIAtomPort {
-    pub fn new(urid: URID<AtomEventTransfer>, index: u32) -> UIAtomPort {
+    pub fn new(urid: URID<atom::uris::EventTransfer>, index: u32) -> UIAtomPort {
         UIAtomPort {
             space_to_plugin: SelfAllocatingSpace::new(),
             space_to_ui: SelfAllocatingSpace::new(),
@@ -218,7 +215,7 @@ pub trait UIPortsTrait : Sized {
         }
     }
 
-    fn map_control_port(&mut self, port_index: u32) -> Option<&mut ControlPort>;
+    fn map_control_port(&mut self, port_index: u32) -> Option<&mut UIControlPort>;
 
     fn map_atom_port(&mut self, port_index: u32) -> Option<&mut UIAtomPort>;
 }
