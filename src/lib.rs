@@ -174,12 +174,17 @@ impl SelfAllocatingSpace {
 
 impl<'a> MutSpace<'a> for SelfAllocatingSpace {
     fn allocate(&mut self, size: usize, apply_padding: bool) -> Option<(usize, &'a mut [u8])> {
+        let padding = if apply_padding {
+            (8 - self.data.len() % 8) % 8
+        } else {
+            0
+        };
+        self.data.resize(self.data.len() + padding, 0);
         let start_point = self.data.len();
         self.data.resize(start_point + size, 0);
         let return_slice = &mut self.data[start_point..];
-        Some((0,
-              unsafe {
-                  std::slice::from_raw_parts_mut(return_slice.as_mut_ptr(), size)
+        Some((0, unsafe {
+            std::slice::from_raw_parts_mut(return_slice.as_mut_ptr(), size)
         }))
     }
 }
