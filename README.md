@@ -1,5 +1,12 @@
 # lv2-ui – prototype for an ui crate for rust-lv2
 
+**This repo is no longer maintained!**
+
+The development has been transferred to
+[rust-lv2](https://github.com/RustAudio/rust-lv2) itself. See
+https://github.com/RustAudio/rust-lv2/pull/75
+
+
 [rust-lv2](https://github.com/RustAudio/rust-lv2) are Rust bindings to write
 [LV2 Plugins](https://lv2plug.in). This crate aims to eventually fill the gap
 in rust-lv2 for LV2 GUIs.
